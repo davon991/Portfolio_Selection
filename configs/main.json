@@ -1,0 +1,122 @@
+{
+  "project": {
+    "name": "CtR_main_CtB_band",
+    "random_seed": 42,
+    "output_base_dir": "results"
+  },
+  "data": {
+    "source": "yfinance",
+    "price_field": "Adj Close",
+    "tickers": [
+      "SPY",
+      "EFA",
+      "EEM",
+      "IEF",
+      "TLT",
+      "TIP",
+      "LQD",
+      "HYG",
+      "GLD",
+      "DBC",
+      "VNQ"
+    ],
+    "start_date": "2006-01-01",
+    "end_date": "2026-03-31",
+    "returns": {
+      "method": "simple",
+      "align": "inner_join_dropna"
+    },
+    "paths": {
+      "prices_csv": "data/processed/prices.csv",
+      "returns_csv": "data/processed/returns.csv"
+    }
+  },
+  "schedule": {
+    "rebalance_rule": "month_end",
+    "trading_days_per_year": 252
+  },
+  "risk": {
+    "window_length_days": 1260,
+    "cov_estimator": "ledoit_wolf",
+    "cov_estimator_alt_for_robustness": "sample"
+  },
+  "constraints": {
+    "long_only": true,
+    "x_max": 0.2
+  },
+  "baseline": {
+    "include_EW": true,
+    "include_GMV": true,
+    "include_ERC": true
+  },
+  "model": {
+    "risk_budget": {
+      "type": "erc",
+      "b_vector": null
+    },
+    "ctb_band": {
+      "use_constraint": true,
+      "D_B_type": "ms",
+      "epsilon_active": 1e-10
+    },
+    "stability": {
+      "eta_enabled": true,
+      "gamma_enabled": true
+    }
+  },
+  "calibration": {
+    "split": {
+      "method": "by_date",
+      "train_end": "2014-12-31",
+      "val_end": "2018-12-31",
+      "test_end": "2026-03-31"
+    },
+    "delta": {
+      "quantiles": [0.4, 0.5, 0.6, 0.7, 0.8],
+      "selection_metric": "sharpe_net_minus_lambda_turnover",
+      "lambda_turnover": 0.5
+    },
+    "eta": {
+      "method": "turnover_target_bisection",
+      "turnover_target": 0.2,
+      "bisection": {
+        "eta_low": 0.0,
+        "eta_high": 5000.0,
+        "max_iter": 30,
+        "tol": 1e-3
+      }
+    },
+    "gamma": {
+      "alpha_candidates": [1e-6, 1e-5, 1e-4],
+      "rule": "gamma = alpha * tr(V)/n",
+      "selection": "smallest_stable"
+    }
+  },
+  "costs": {
+    "fee_bps": 10,
+    "apply_to": "turnover",
+    "net_returns": true
+  },
+  "solver": {
+    "method": "penalty",
+    "penalty": {
+      "rho": 2000.0,
+      "hinge_power": 2
+    },
+    "optimizer": {
+      "name": "SLSQP",
+      "max_iter": 800,
+      "tol": 1e-9
+    },
+    "fallback": {
+      "on_fail": "use_x_prev",
+      "max_retries": 1
+    }
+  },
+  "reporting": {
+    "export_figures": true,
+    "export_tables": true,
+    "figure_formats": ["png", "pdf"],
+    "selected_windows_for_barplots": 3
+  }
+}
