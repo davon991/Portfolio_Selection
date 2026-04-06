@@ -1,100 +1,207 @@
-# spec.md (Freeze-0)
-# Project: CtR 主目标 + CtB 风控约束（band）
-# Data: Broad-asset-class ETFs
-# Status: FROZEN
+# paper/spec.md
+# Project Spec (Freeze-0)
+# Title: CtR Primary Objective + CtB Risk-Control Constraint (Band)
+# Version: 1.0.0
+# Status: FROZEN (Any change requires spec_diff.md + smoke run)
 
-## 0. 范围与原则
-- 决策变量唯一：价值权重向量 x。
-- 风险输入唯一：收益协方差矩阵 V_t（滚动估计）。
-- 指标口径唯一：CtR、CtB、D_R、D_B（见第3节）。
-- 主模型唯一：CtR 主目标 + CtB 上界约束（band）（见第4节）。
-- 主文 long-only；允许做空仅作为附录扩展，不进入主线与主实证。
+## 0. Scope
+This spec fixes the unique notation, metric definitions, optimization model, backtest accounting, and required outputs.
+All subsequent writing, code, and results must conform exactly to this document.
 
-## 1. 记号（唯一版本）
-- 资产数量：n；资产索引 i=1,...,n。
-- 价格：S_i(t)，使用“复权收盘价/Adjusted Close”。
-- 简单收益：ξ_i(t) = S_i(t)/S_i(t-1) - 1。
-- 收益向量：ξ(t) = (ξ_1(t),...,ξ_n(t))^T。
-- 权重（决策变量）：x(t) = (x_1(t),...,x_n(t))^T。
-- 预算约束：1^T x(t) = 1。
-- 可行域（约束集合）：
-  W = { x ∈ R^n : 1^T x = 1, 0 ≤ x_i ≤ x_max }。
-- 协方差矩阵（滚动估计）：V_t = Cov_t(ξ)，正定/半正定，按估计器给出。
-- 单资产波动：σ_i(t) = sqrt((V_t)_{ii})。
-- 组合波动：σ_p(x; t) = sqrt(x^T V_t x)。
+---
 
-## 2. 回测时间结构（唯一口径）
-- 观测频率：日度。
-- 重平衡频率：月度（每月最后一个交易日）。
-- 估计窗口：长度 L（见 calibration_protocol.md），用于估计 V_t。
-- 时间一致性：
-  - 在重平衡日 t_k：仅使用 {ξ(t_k-L),...,ξ(t_k-1)} 估计 V_{t_k}；
-  - 在 t_k 生成 x(t_k)；
-  - 持有区间收益从 (t_k → t_k+1) 开始记账；禁止任何前视使用。
+## 1. Notation (Unique)
+- Assets: i = 1,...,n
+- Rebalancing dates: t ∈ 𝒯 = {t_1,...,t_K} (monthly by default)
+- Daily simple returns vector: ξ(τ) = (ξ_1(τ),...,ξ_n(τ))ᵀ for trading day τ
+- Weight vector at rebalancing date t: x(t) ∈ ℝⁿ
+- Feasible set (long-only with cap):
+  𝒲 := { x ∈ ℝⁿ : 1ᵀx = 1, 0 ≤ x_i ≤ x_max }
+- Rolling risk window length (daily observations): L (fixed per run)
+- Covariance (risk input) at rebalancing date t:
+  V_t := Cov_t(ξ) estimated from daily returns {ξ(τ)} over τ = t-L,...,t-1
+- Asset volatilities: σ_i := sqrt( (V_t)_{ii} )
+- Portfolio volatility:
+  σ_p(x) := sqrt( xᵀ V_t x )
 
-## 3. 指标体系（唯一定义）
-### 3.1 CtR（Contribution to Risk）
-定义（归一化风险贡献）：
-CtR_i(x; t) = x_i * (V_t x)_i / (x^T V_t x)
-并满足 Σ_i CtR_i = 1。
+---
 
-风险预算向量：
-b = (b_1,...,b_n)^T，b_i > 0，Σ_i b_i = 1。
-ERC：b_i = 1/n。
+## 2. Metric System (Unique)
 
-CtR 偏离度（主目标指标）：
-D_R(x; b, t) = Σ_{i=1}^n ( CtR_i(x; t) - b_i )^2。
+### 2.1 CtR (Contribution to Risk)
+For any feasible x:
+- CtR_i(x) := [ x_i (V_t x)_i ] / [ xᵀ V_t x ]
+- Additivity: ∑_{i=1}^n CtR_i(x) = 1
 
-### 3.2 CtB（Correlation to Basket）
-定义（资产与组合收益的相关暴露）：
-CtB_i(x; t) = Corr(ξ_i, ξ_p) = (V_t x)_i / ( σ_i(t) * σ_p(x; t) )，
-其中 ξ_p = x^T ξ。
+Risk budget vector:
+- b = (b_1,...,b_n)ᵀ, b_i > 0, ∑ b_i = 1
+- ERC baseline uses b_i = 1/n
 
-CtB 截面均值：
-\overline{CtB}(x; t) = (1/n) Σ_i CtB_i(x; t)。
+CtR deviation (primary objective component):
+- D_R(x; b) := ∑_{i=1}^n ( CtR_i(x) - b_i )^2
 
-CtB 离散度（风控指标，主线唯一）：
-D_B(x; t) = Σ_{i=1}^n ( CtB_i(x; t) - \overline{CtB}(x; t) )^2。
+### 2.2 CtB (Correlation to Basket)
+Define CtB_i as correlation between asset return and portfolio return under (V_t, x):
+- CtB_i(x) := Corr( ξ_i, ξ_p ) where ξ_p = xᵀ ξ
+Using covariance identity:
+- CtB_i(x) := (V_t x)_i / [ σ_i σ_p(x) ]
 
-### 3.3 CtR–CtB 结构关系（用于解释，不作为额外约束）
-CtR_i(x; t) = [ x_i * σ_i(t) / σ_p(x; t) ] * CtB_i(x; t)。
+Cross-sectional mean:
+- meanCtB(x) := (1/n) ∑_{i=1}^n CtB_i(x)
 
-## 4. 主模型（唯一）
-在每个重平衡时点 t_k，求解：
-min_{x ∈ W}  D_R(x; b, t_k) + η ||x - x(t_{k-1})||_2^2 + γ ||x||_2^2
-s.t.         D_B(x; t_k) ≤ δ
+CtB dispersion (risk-control metric):
+- D_B(x) := ∑_{i=1}^n ( CtB_i(x) - meanCtB(x) )^2
 
-参数：
-- δ：CtB 风控阈值（由 calibration_protocol.md 规则化构造与选择）
-- η：平滑参数（由 turnover/成本约束校准）
-- γ：稳定正则（尺度规则 + 敏感性口径）
-- x(t_{k-1})：上一期实际持有权重；首期初始化按 calibration_protocol.md 规定。
+### 2.3 Turnover and Costs
+Single-period turnover at rebalancing date t:
+- TO(t) := (1/2) ∑_{i=1}^n | x_i(t) - x_i(t_prev) |
 
-实现等价形式（仅用于求解器；不改变模型口径）：
-采用带容忍带的罚函数（hinge penalty）：
-min_{x ∈ W}  D_R + η||x-x_prev||^2 + γ||x||^2 + (ρ/2) * (D_B - δ)_+^2
-其中 (u)_+ = max(u, 0)，ρ>0 为罚强度（实现细节在代码中固定，主文不引入新的模型自由度）。
+Proportional transaction cost model (applied at rebalancing):
+- net_return(τ) = gross_return(τ) - c * TO(t) for τ ∈ [t, next_rebalancing)
+where c is fixed “one-way fee rate” per unit turnover.
 
-## 5. 基准策略（固定集合）
-- EW：x_i = 1/n。
-- GMV：min_{x ∈ W} x^T V_t x。
-- ERC：min_{x ∈ W} D_R(x; (1/n)1, t)（与主模型同一 W 与同一 V_t）。
+---
 
-## 6. 交易与成本口径（唯一）
-- 单期换手（重平衡 t_k）：
-TO(t_k) = 0.5 * Σ_i | x_i(t_k) - x_i(t_{k-1}) |。
-- 成本调整（比例成本）：
-持有区间内净收益：ξ_p^net(t) = ξ_p(t) - c * TO(t_k)，t ∈ [t_k, t_{k+1})。
-- 成本参数 c 由配置指定；主文报告主设定与附录成本敏感性。
+## 3. Strategies (Baselines + Proposed)
 
-## 7. 输出口径（与代码 I/O 契约一致）
-每次 run 输出 results/<run_id>/，必须包含：
-- run_manifest.json（spec版本、data哈希、代码版本、输出清单）
-- diagnostics.json（数据与回测诊断）
-- analysis_pack.json（关键统计摘要）
-- panel.parquet（长表：date-asset 面板，含 weight/ctr/ctb/dr/db/delta/active/turnover 等）
-- summary_metrics.csv、dr_db.csv、perf_daily.csv
-- 论文图（pdf/png）：净值、回撤、CtR/CtB 分解、D_B vs δ 时序、（可选）D_R–D_B 前沿图
+### 3.1 EW (Equal Weight)
+x_i(t) = 1/n
 
-## 8. 版本与冻结
-- spec.md 为 Freeze-0 文件，任何修改必须先提交 spec_diff.md，说明变更内容与影响面，并通过 smoke 运行。
+### 3.2 GMV (Global Minimum Variance under 𝒲)
+At each t:
+- x_GMV(t) ∈ argmin_{x ∈ 𝒲} xᵀ V_t x
+
+### 3.3 ERC (CtR-only baseline under 𝒲)
+At each t:
+- x_ERC(t) ∈ argmin_{x ∈ 𝒲} D_R(x; 1/n * 1)
+
+### 3.4 Proposed: RB–CtB Band (CtR primary + CtB constraint)
+At each t:
+Constrained form (conceptual):
+- minimize   D_R(x; b) + η ||x - x(t_prev)||_2^2 + γ ||x||_2^2
+  subject to x ∈ 𝒲,  D_B(x) ≤ δ
+
+Implementation form (band via hinge penalty; mainline solver):
+Let (u)_+ := max(u, 0). Define objective:
+- J(x) := D_R(x; b) + η ||x - x_prev||_2^2 + γ ||x||_2^2 + (ρ/2) * ( D_B(x) - δ )_+^2
+Solve:
+- x*(t) ∈ argmin_{x ∈ 𝒲} J(x)
+
+Parameters:
+- δ: CtB dispersion threshold (from calibration_protocol.md)
+- η: smoothing parameter (from calibration_protocol.md)
+- γ: L2 stabilizer (from calibration_protocol.md)
+- ρ: penalty strength (fixed by config; must be recorded in run_manifest.json)
+
+Constraint-active flag (for reporting):
+- active(t) := 1{ D_B(x(t)) ≥ δ - eps_db }, eps_db fixed constant in config.
+
+---
+
+## 4. Backtest Accounting (Unique)
+- Daily returns are computed from adjusted close prices (see data_contract.md).
+- Risk input V_t uses only past data up to t-1 (no look-ahead).
+- Weights x(t) are applied to subsequent daily returns until next rebalancing date.
+- Gross portfolio daily return:
+  r_p_gross(τ) := x(t)ᵀ ξ(τ) for τ in holding period after t
+- Net portfolio daily return:
+  r_p_net(τ) := r_p_gross(τ) - c * TO(t) for τ in holding period after t
+
+Performance metrics:
+- Annualization must follow frequency conventions stated in data_contract.md (daily to annual, monthly to annual).
+
+---
+
+## 5. Required Outputs (Contract)
+Each run writes to results/<run_id>/ and MUST include:
+
+### 5.1 Traceability
+- config.json
+- run_manifest.json (schema fixed below)
+- diagnostics.json (schema fixed below)
+- analysis_pack.json (schema fixed below)
+
+### 5.2 Machine-readable core
+- panel.parquet (long panel; required)
+- summary_metrics.csv (required)
+- dr_db.csv (required)
+- perf_daily.csv (required)
+- weights.csv (wide; required)
+- weights_long.csv (long; required)
+- ctr_long.csv (required)
+- ctb_long.csv (required)
+
+### 5.3 Figures (pdf+png)
+- fig_equity_curve
+- fig_drawdown
+- fig_ctr_bar (selected windows; data references must be in panel)
+- fig_ctb_bar (selected windows)
+- fig_db_vs_delta_timeseries
+- fig_pareto_dr_db (optional but recommended)
+
+---
+
+## 6. run_manifest.json (Schema)
+Required keys:
+- run_id
+- created_utc
+- spec_version (this spec version)
+- data_contract_version
+- calibration_protocol_version
+- code_commit (git hash or "NA" if not using git)
+- python_version
+- platform
+- universe (list of tickers)
+- date_range: {start, end}
+- frequency: {data:"daily", rebalance:"monthly"}
+- window_L
+- covariance_method (e.g., "ledoit_wolf_shrinkage")
+- constraints: {x_max}
+- costs: {c}
+- parameters: {delta, eta, gamma, rho, eps_db}
+- outputs: list of file paths written
+
+---
+
+## 7. diagnostics.json (Schema)
+Must include:
+- data_checks:
+  - missing_rate_by_asset
+  - missing_rate_by_date
+  - alignment_rule_used
+  - lookahead_check_passed (bool) + notes
+- solver_checks:
+  - convergence_rate
+  - failed_dates (list)
+  - avg_iterations (if available)
+- constraint_checks:
+  - active_rate
+  - db_margin_stats (db - delta summary)
+  - boundary_rate_zero
+  - boundary_rate_xmax
+- turnover_checks:
+  - avg_turnover
+  - turnover_p95
+  - turnover_outlier_dates
+- warnings (list of strings)
+
+---
+
+## 8. analysis_pack.json (Schema)
+Must include summary statistics used for writing Chapter 6 and defense:
+- run_id
+- headline_metrics:
+  - for each strategy: ann_return, ann_vol, sharpe, max_drawdown, avg_turnover, net_sharpe
+- mechanism_metrics:
+  - db_reduction_vs_erc (relative/absolute)
+  - dr_change_vs_erc
+  - active_rate
+  - typical_active_periods (optional)
+- robustness_flags:
+  - any_warning (bool)
+  - key_warnings (list)
+- pointers:
+  - table_files (list)
+  - figure_files (list)
+
+---
