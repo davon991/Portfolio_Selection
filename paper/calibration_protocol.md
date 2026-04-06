@@ -1,109 +1,135 @@
-# calibration_protocol.md (Freeze-2)
-# Calibration Protocol for (δ, η, γ) and acceptance criteria
+# paper/calibration_protocol.md
+# Calibration Protocol (Freeze-2)
+# Version: 1.0.0
 # Status: FROZEN
 
-## 0. 目的
-在固定 spec.md 与 data_contract.md 的前提下，给出 (δ, η, γ) 的规则化校准协议：
-- 可复现
-- 低自由度
-- 可审计（run_manifest.json + analysis_pack.json）
+## 0. Purpose
+Defines a rule-based, auditable calibration of δ, η, γ for the RB–CtB Band strategy.
+Calibration must be strictly chronological and low-degree-of-freedom.
 
-## 1. 数据划分（固定规则）
-以重平衡序列 {t_1,...,t_K} 为单位划分：
-- Train: 前 60% 的重平衡点
-- Val:   中间 20%
-- Test:  后 20%
+---
 
-约束：
-- Train 与 Val 均需包含足够多的重平衡点（建议 ≥ 24 个月）；不足则改为“固定日期切分”，并记录到 run_manifest.json。
+## 1. Data Split (Unique)
+Let rebalancing dates be 𝒯 = {t_1,...,t_K}. Split chronologically:
+- Train: first 60% of rebalancing dates
+- Validation: next 20%
+- Test: last 20%
 
-## 2. δ：CtB 阈值构造与选择（核心）
-### 2.1 训练期基准分布构造
-对每个 t_k ∈ Train：
-1) 估计 V_{t_k}（按 spec 主设定）
-2) 求 ERC：
-   x^{ERC}(t_k) ∈ argmin_{x∈W} D_R(x; b=1/n)
-3) 计算 z_k = D_B(x^{ERC}(t_k))
+All calibration choices (δ, η, γ) are finalized using Train/Validation ONLY.
+Test is held out and must not influence calibration.
 
-得到经验分布 {z_k}。
+---
 
-### 2.2 阈值族（低自由度）
-固定分位数集合：
-P = {0.4, 0.5, 0.6, 0.7, 0.8}
+## 2. δ (CtB Threshold) Calibration
 
-定义：
-δ(p) = Quantile_p({z_k}),  p ∈ P
+### 2.1 Construct ERC baseline distribution
+For each t in Train:
+1) Estimate V_t from past L daily returns.
+2) Solve ERC baseline:
+   x_ERC(t) ∈ argmin_{x ∈ 𝒲} D_R(x; 1/n * 1)
+3) Compute z(t) := D_B( x_ERC(t) )
 
-### 2.3 验证期选择
-对每个候选 p ∈ P：
-- 固定 δ = δ(p)
-- 采用后述 η 校准规则得到 η(p)
-- 固定 γ（第4节）
-- 在 Val 上运行主模型，计算 Val 目标函数（用于比较）：
-  Score(p) = Sharpe_net(p) - λ_TO * avg_TO(p) - λ_DD * MDD(p)
+Collect {z(t)} over Train.
 
-其中：
-- Sharpe_net 为成本后 Sharpe
-- avg_TO 为平均换手
-- MDD 为最大回撤
-- λ_TO, λ_DD 为预先固定常数（写入 config，不在校准中调整）
-选择：
-p* = argmax_p Score(p)
-并固定 δ = δ(p*) 进入 Test。
+### 2.2 Candidate threshold family
+Fix candidate quantile grid (LOW DoF):
+- 𝒫 := {0.4, 0.5, 0.6, 0.7, 0.8}
 
-### 2.4 可行性下界检查（实现级）
-在 Train∪Val 上，额外求解：
-x^{Bmin}(t_k) ∈ argmin_{x∈W} D_B(x; t_k)
-m_k = D_B(x^{Bmin}(t_k))
-必要条件：δ ≥ max m_k
-若 δ(p*) 不满足，则选取满足可行性的最小更大分位数，或将该 run 标记为“不可接受”（见第5节拒绝标准）。
+Define:
+- δ(p) := Quantile_p( {z(t)} ), p ∈ 𝒫
 
-## 3. η：以交易可执行性为准则的单调校准
-### 3.1 目标
-在 Val 上满足：
-avg_TO(η) ≤ TO_target
-其中 TO_target 固定写入 config（建议主设定 0.20/月，稳健性 0.10 与 0.30 作为附录）。
+### 2.3 Select p* on Validation
+For each p in 𝒫:
+- Fix δ = δ(p)
+- Temporarily fix γ (Section 4) and calibrate η (Section 3) using Validation.
+- Run Validation backtest for RB–CtB Band and record:
+  - net Sharpe (primary)
+  - max drawdown (secondary)
+  - average turnover (constraint)
+Select p* by:
+- Maximize net Sharpe subject to average turnover ≤ TO_target (fixed below)
+If multiple p tie within tolerance, choose the largest δ (less restrictive) among tied candidates.
 
-### 3.2 搜索方法
-利用 η 与 avg_TO 的单调性，采用二分搜索：
-- 给定区间 [η_low, η_high]（写入 config）
-- 迭代直至 |avg_TO - TO_target| ≤ tol 或达到 max_iter
-得到 η*。
+### 2.4 Feasibility safeguard (required)
+Compute (on Train ∪ Validation) a feasibility lower bound:
+- For each t, solve x_Bmin(t) ∈ argmin_{x ∈ 𝒲} D_B(x)
+- Record m(t) := D_B(x_Bmin(t))
+Require:
+- δ(p) ≥ max_t m(t)  (otherwise δ(p) is invalid and removed from candidate set)
 
-说明：
-- η 的校准不以收益指标直接优化；收益仅用于 δ 的候选比较（Score）。
+---
 
-## 4. γ：尺度规则 + 最小稳定原则
-定义尺度：
-s_t = tr(V_{t_k}) / n
+## 3. η (Smoothing) Calibration
+η is calibrated to satisfy a trading stability requirement, not to maximize performance directly.
 
-固定候选集合：
-α ∈ {1e-6, 1e-5, 1e-4}
-取：
-γ = α * median_{t_k ∈ Train} s_t
+### 3.1 Fixed turnover target
+Set:
+- TO_target := 0.15  (monthly average turnover target; fixed constant)
+- tolerance ε_TO := 0.01
 
-选择规则：
-- 取“最小且满足数值稳定”的 α（收敛失败率为 0，或低于阈值），并固定进入 Test。
-- γ 不在 Test 上再调整；仅在附录报告敏感性（α 网格）。
+### 3.2 Monotone search
+Given fixed δ and γ, determine η on Validation by bisection:
+- Find η* such that | avg_turnover_val(η*) - TO_target | ≤ ε_TO
+Search interval:
+- η_low = 0
+- η_high = η_init_high (increase until avg_turnover_val(η_high) < TO_target)
 
-## 5. 拒绝标准（自动化；写入 diagnostics.json）
-若满足任一条件，则该配置（或该 δ 候选）视为不可接受：
-1) 约束激活率极端（Val 或 Test）：
-   activation_rate < 0.05 或 > 0.90
-2) 贴边率极端（长期大量 x_i=0 或 x_i=x_max）：
-   boundary_share > 0.80（阈值写入 config）
-3) 求解失败或不收敛：
-   fail_rate > 0.00（主线要求 0；允许在附录给出放宽口径）
-4) 可行性失败：
-   存在 t_k 使得 D_B 最小值 m_k > δ（见 2.4）
-5) 换手异常：
-   avg_TO 超过上限 TO_cap（写入 config）
+Record η* in run_manifest.json.
 
-拒绝信息与触发期列表必须记录到 diagnostics.json 与 run_manifest.json。
+---
 
-## 6. 输出要求（用于论文与 GPT 二次分析）
-每个 run 必须生成：
-- analysis_pack.json：δ/η/γ、激活率、贴边率、D_B 降幅、D_R 变化、成本后指标变化、异常期列表
-- dr_db.csv：逐期记录 D_R, D_B, δ, active, turnover
-- summary_metrics.csv：策略对照汇总
-- run_manifest.json：记录上述文件哈希与 spec/contract/protocol 版本号
+## 4. γ (L2 Stabilizer) Calibration
+γ follows a scale rule with minimal sensitivity.
+
+### 4.1 Scale rule candidates
+Let s_t := tr(V_t)/n at each t. Define:
+- γ(α) := α * median_{t∈Train}( s_t )
+Candidate set:
+- α ∈ {1e-6, 1e-5, 1e-4}
+
+### 4.2 Selection rule
+Choose the smallest α such that:
+- Solver convergence rate ≥ 99% on Validation
+- No persistent boundary pathology (Section 5)
+If α=1e-6 already satisfies, fix it and treat γ as “minimal stabilizer.”
+
+---
+
+## 5. Rejection Criteria (Hard Checks)
+A calibrated (δ, η, γ) is rejected if ANY holds on Validation:
+
+### 5.1 Constraint activation extremes
+Let active_rate be fraction of rebalancing dates where D_B(x(t)) ≥ δ - eps_db.
+Reject if:
+- active_rate < 0.05  OR  active_rate > 0.90
+
+### 5.2 Boundary pathology
+Let boundary_zero_rate = average fraction of assets with x_i(t) = 0.
+Let boundary_xmax_rate = average fraction of assets with x_i(t) = x_max.
+Reject if:
+- boundary_xmax_rate > 0.30  (cap-binding too often)
+- boundary_zero_rate > 0.80  (excess sparsity; indicates over-constraint or estimation issues)
+
+### 5.3 Turnover pathology
+Reject if:
+- avg_turnover_val > TO_target + 2*ε_TO
+- turnover_p95 is extremely high relative to median (must be logged; threshold set in code as a multiple, e.g., p95/median > 5)
+
+### 5.4 Solver failures
+Reject if:
+- convergence_rate < 0.99
+- any repeated failure streak (≥3 consecutive rebalancing dates fail)
+
+All rejection reasons must be written to diagnostics.json.
+
+---
+
+## 6. Finalization
+After selecting p*, η*, γ:
+- Freeze parameters and rerun full Test evaluation without changing any calibration decisions.
+- Record:
+  - δ, η, γ, ρ, eps_db
+  - p* and candidate set results
+in run_manifest.json and analysis_pack.json.
+
+---
