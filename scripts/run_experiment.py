@@ -1,11 +1,14 @@
 import argparse
-import json
 import platform
 import sys
 from pathlib import Path
 from datetime import datetime, timezone
 
-import numpy as np
+# ===== FIX: ensure project root is on sys.path so `import src...` works =====
+PROJECT_ROOT = Path(__file__).resolve().parents[1]  # .../scripts/ -> project root
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+# ==========================================================================
 
 from src.utils import (
     load_yaml,
@@ -54,7 +57,7 @@ def main() -> None:
     if cfg.get("reporting", {}).get("make_figures", True):
         make_all_figures(cfg, run_dir)
 
-    # Build run_manifest.json
+    # Build run_manifest.json (per spec.md schema)
     run_manifest = {
         "run_id": run_id,
         "created_utc": datetime.now(timezone.utc).isoformat(),
@@ -88,9 +91,6 @@ def main() -> None:
 
     # Save config.json (expanded)
     save_json(run_dir / "config.json", cfg)
-
-    # Save diagnostics / analysis_pack already created by pipeline; ensure listed
-    # Nothing else to do here.
 
 
 if __name__ == "__main__":
