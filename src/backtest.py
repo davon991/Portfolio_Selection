@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-import json
-from pathlib import Path
-from typing import Any, Dict, List, Tuple
-
 import numpy as np
 import pandas as pd
+from pathlib import Path
+from typing import Any, Dict, List
 
 from src.covariance import estimate_covariance
 from src.metrics import (
@@ -35,13 +33,27 @@ def _load_returns_long(path: str) -> pd.DataFrame:
 def _returns_wide(returns_long: pd.DataFrame, tickers: List[str]) -> pd.DataFrame:
     wide = returns_long.pivot(index="date", columns="ticker", values="ret").sort_index()
     wide = wide[tickers]
-    return wide.dropna(how="any")
+    wide = wide.dropna(how="any")
+    return wide
 
 
 def _monthly_last_rebalance_dates(dates: pd.DatetimeIndex) -> pd.DatetimeIndex:
-    s = pd.Series(index=dates, data=np.ones(len(dates)))
-    last_dates = s.resample("M").apply(lambda x: x.index[-1]).dropna().astype("datetime64[ns]")
-    return pd.DatetimeIndex(last_dates.values)
+    """
+    Per data_contract.md: monthly rebalancing on the last trading day of each month
+    within the aligned calendar.
+
+    Pandas >= 2.2 uses 'ME' for month-end frequency (deprecated 'M').
+    """
+    if len(dates) == 0:
+        return pd.DatetimeIndex([])
+
+    s = pd.Series(np.ones(len(dates)), index=dates)
+    # group by month-end and take the last index in each group
+    # Use 'ME' (month-end) rather than deprecated 'M'
+    grouped = s.resample("ME")
+    last_dates = grouped.apply(lambda x: x.index[-1]).dropna()
+
+    return pd.DatetimeIndex(last_dates.values).sort_values()
 
 
 def _split_rebal_dates(rebal: List[pd.Timestamp], train_frac: float, val_frac: float) -> Dict[str, List[pd.Timestamp]]:
@@ -89,7 +101,6 @@ def _run_strategy_over_rebal(
     x_max: float,
     cost_c: float,
     b: np.ndarray,
-    # Proposed parameters (may be None for baselines)
     delta: float | None,
     eta: float | None,
     gamma: float | None,
@@ -109,12 +120,16 @@ def _run_strategy_over_rebal(
 
     x_prev = np.full(n, 1.0 / n)
 
-    failures = []
-    iters = []
+    failures: List[str] = []
+    iters: List[int] = []
 
     for k, t in enumerate(rebal_dates):
+        pos_arr = dates.get_indexer([t])
+        if pos_arr.size == 0 or pos_arr[0] == -1:
+            continue
+        pos = int(pos_arr[0])
+
         # ensure enough history for covariance estimation
-        pos = dates.get_indexer([t])[0]
         if pos < L:
             continue
 
@@ -151,7 +166,7 @@ def _run_strategy_over_rebal(
             raise ValueError("Unknown strategy name")
 
         if not success:
-            failures.append(str(t.date()))
+            failures.append(str(pd.to_datetime(t).date()))
         iters.append(int(nit))
 
         to = turnover(x_prev, x)
@@ -201,52 +216,35 @@ def _run_strategy_over_rebal(
 
 
 def _panel_long_from_outputs(
-    returns: pd.DataFrame,
-    tickers: List[str],
     strategy_name: str,
     weights_df: pd.DataFrame,
     ctr_df: pd.DataFrame,
     ctb_df: pd.DataFrame,
     drdb_df: pd.DataFrame,
 ) -> pd.DataFrame:
-    # long weights/ctr/ctb at rebal dates
     w_long = weights_df.melt(id_vars=["date"], var_name="asset", value_name="weight")
     c_long = ctr_df.melt(id_vars=["date"], var_name="asset", value_name="ctr")
     b_long = ctb_df.melt(id_vars=["date"], var_name="asset", value_name="ctb")
 
     panel = w_long.merge(c_long, on=["date", "asset"], how="left").merge(b_long, on=["date", "asset"], how="left")
     panel["strategy"] = strategy_name
-
-    # attach dr/db/delta/active/turnover at date
     panel = panel.merge(drdb_df[["date", "dr", "db", "delta", "active", "turnover"]], on="date", how="left")
     return panel
 
 
 def run_full_pipeline(cfg: Dict[str, Any], run_dir: Path, data_artifacts: Dict[str, str]) -> Dict[str, Any]:
-    """
-    Orchestrates:
-    - load returns
-    - create rebal dates
-    - calibration (δ, η, γ) per protocol
-    - run backtests for EW/GMV/ERC/Proposed
-    - write outputs per spec.md
-    - write diagnostics.json and analysis_pack.json
-    """
     tickers = [t.upper() for t in cfg["data"]["tickers"]]
     returns_long = _load_returns_long(data_artifacts["returns_parquet"])
     returns = _returns_wide(returns_long, tickers)
     dates = returns.index
 
-    # Rebalance dates
     if cfg["experiment"]["rebalance"] != "monthly_last":
         raise ValueError("Only monthly_last is supported per data_contract.md")
-    rebal_dates = _monthly_last_rebalance_dates(dates).to_list()
 
-    # Split
+    rebal_dates = _monthly_last_rebalance_dates(dates).to_list()
     cal = cfg["calibration"]
     split = _split_rebal_dates(rebal_dates, cal["train_frac"], cal["val_frac"])
 
-    # Setup
     L = int(cfg["experiment"]["window_L"])
     V_method = cfg["experiment"]["covariance_method"]
     x_max = float(cfg["experiment"]["x_max"])
@@ -255,11 +253,10 @@ def run_full_pipeline(cfg: Dict[str, Any], run_dir: Path, data_artifacts: Dict[s
     rho = float(cfg["solver"]["rho"])
 
     n = len(tickers)
-    b = np.full(n, 1.0 / n)  # ERC budget default (spec baseline)
+    b = np.full(n, 1.0 / n)  # ERC budget default
     solver_cfg = {"max_iter": int(cfg["solver"]["max_iter"]), "tol": float(cfg["solver"]["tol"])}
 
     # --- Calibration: gamma ---
-    # median s_t over train windows
     s_list = []
     for t in split["train"]:
         pos = dates.get_indexer([t])[0]
@@ -274,14 +271,12 @@ def run_full_pipeline(cfg: Dict[str, Any], run_dir: Path, data_artifacts: Dict[s
 
     alpha_grid = [float(a) for a in cal["alpha_grid"]]
     gamma_candidates = [a * s_med for a in alpha_grid]
+    gamma = float(gamma_candidates[0])  # minimal stabilizer (protocol’s selection refined via diagnostics)
 
     # --- Calibration: delta candidates from ERC DB distribution + feasibility check ---
-    # Train: compute z(t)=DB(ERC)
     z = []
-    # Feasibility lower bound m(t) via DB-min
     m_vals = []
 
-    # Helper to solve DB-min (SLSQP) under W
     from scipy.optimize import minimize
     from src.metrics import D_B as DB_metric
 
@@ -322,15 +317,9 @@ def run_full_pipeline(cfg: Dict[str, Any], run_dir: Path, data_artifacts: Dict[s
         d = float(np.quantile(z, p))
         if d >= m_lower:
             delta_candidates.append((p, d))
-
     if len(delta_candidates) == 0:
         raise RuntimeError("All delta candidates invalid by feasibility lower bound.")
 
-    # --- Select gamma as smallest alpha meeting convergence>=99% and no pathology on Validation ---
-    # For simplicity, we select smallest gamma; full rejection is handled later with diagnostics.
-    gamma = float(gamma_candidates[0])
-
-    # --- For each delta candidate: calibrate eta by turnover target on Validation, compute net Sharpe ---
     TO_target = float(cal["TO_target"])
     eps_TO = float(cal["eps_TO"])
 
@@ -355,7 +344,6 @@ def run_full_pipeline(cfg: Dict[str, Any], run_dir: Path, data_artifacts: Dict[s
         return float(drdb["turnover"].mean()) if len(drdb) else np.nan
 
     def calibrate_eta(delta: float) -> float:
-        # expand eta_high until turnover below target
         eta_low = 0.0
         eta_high = 1.0
         to_high = avg_turnover_for_eta(delta, eta_high)
@@ -367,7 +355,6 @@ def run_full_pipeline(cfg: Dict[str, Any], run_dir: Path, data_artifacts: Dict[s
         if np.isnan(to_high):
             return eta_high
 
-        # bisection
         for _ in range(20):
             eta_mid = 0.5 * (eta_low + eta_high)
             to_mid = avg_turnover_for_eta(delta, eta_mid)
@@ -411,7 +398,6 @@ def run_full_pipeline(cfg: Dict[str, Any], run_dir: Path, data_artifacts: Dict[s
         s = net_sharpe_for(delta, eta)
         candidate_scores.append({"p": p, "delta": delta, "eta": eta, "net_sharpe": float(s)})
 
-    # Choose best by net_sharpe; ties resolved by larger delta
     candidate_scores = [c for c in candidate_scores if not np.isnan(c["net_sharpe"])]
     if not candidate_scores:
         raise RuntimeError("No valid candidate produced finite net Sharpe on validation.")
@@ -421,9 +407,9 @@ def run_full_pipeline(cfg: Dict[str, Any], run_dir: Path, data_artifacts: Dict[s
     delta_star = float(chosen["delta"])
     eta_star = float(chosen["eta"])
 
-    # --- Final backtests on full set (EW/GMV/ERC/Proposed) ---
+    # --- Final backtests ---
     strategies = ["EW", "GMV", "ERC", "RB_CTB_BAND"]
-    all_out = {}
+    all_out: Dict[str, Any] = {}
     for sname in strategies:
         if sname == "RB_CTB_BAND":
             out = _run_strategy_over_rebal(
@@ -461,18 +447,16 @@ def run_full_pipeline(cfg: Dict[str, Any], run_dir: Path, data_artifacts: Dict[s
             )
         all_out[sname] = out
 
-    # --- Write required files ---
-    written_files = []
+    written_files: List[str] = []
 
-    # perf_daily.csv (gross/net by date and strategy)
+    # perf_daily.csv
     perf_all = pd.concat([all_out[s]["perf"] for s in strategies], ignore_index=True)
     perf_daily = perf_all.groupby(["date", "strategy"], as_index=False)[["gross", "net"]].sum().sort_values(["date", "strategy"])
     perf_daily_path = run_dir / "perf_daily.csv"
     _write_csv(perf_daily_path, perf_daily)
     written_files.append(str(perf_daily_path))
 
-    # weights.csv etc per strategy (store RB_CTB_BAND as main, but export all in panel.parquet)
-    # For required wide weights.csv, we export proposed strategy weights.
+    # Proposed required exports
     w_prop = all_out["RB_CTB_BAND"]["weights"].copy()
     w_prop_path = run_dir / "weights.csv"
     _write_csv(w_prop_path, w_prop)
@@ -500,12 +484,10 @@ def run_full_pipeline(cfg: Dict[str, Any], run_dir: Path, data_artifacts: Dict[s
     _write_csv(drdb_path, drdb_prop)
     written_files.append(str(drdb_path))
 
-    # panel.parquet (long panel for all strategies)
+    # panel.parquet (all strategies)
     panels = []
     for sname in strategies:
         panels.append(_panel_long_from_outputs(
-            returns=returns,
-            tickers=tickers,
             strategy_name=sname,
             weights_df=all_out[sname]["weights"],
             ctr_df=all_out[sname]["ctr"],
@@ -525,7 +507,6 @@ def run_full_pipeline(cfg: Dict[str, Any], run_dir: Path, data_artifacts: Dict[s
         net = daily["net"]
         m_g = _annual_metrics(gross)
         m_n = _annual_metrics(net)
-        # turnover from drdb (rebalance-level)
         avg_to = float(all_out[sname]["drdb"]["turnover"].mean()) if len(all_out[sname]["drdb"]) else np.nan
         summary_rows.append({
             "strategy": sname,
@@ -580,5 +561,4 @@ def run_full_pipeline(cfg: Dict[str, Any], run_dir: Path, data_artifacts: Dict[s
     written_files.append(str(run_dir / "analysis_pack.json"))
 
     final_parameters = {"delta": delta_star, "eta": eta_star, "gamma": gamma}
-
     return {"final_parameters": final_parameters, "written_files": written_files}
