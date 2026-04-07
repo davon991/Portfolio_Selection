@@ -1,1 +1,47 @@
 
+---
+
+# 4) `configs/smoke.yaml`
+
+```yaml
+run:
+  name: "smoke"
+  results_dir: "results"
+  seed: 123
+  code_commit: "NA"   # 建议你后续用 git hash 自动注入
+
+data:
+  source: "yfinance"   # "yfinance" 或 "csv_folder"
+  csv_folder: "data/raw"   # 当 source=csv_folder 时使用
+  tickers: ["SPY","VEA","VWO","IEF","TLT","LQD","HYG","GLD","DBC","VNQ"]
+  start: "2015-01-01"
+  end: "2022-12-31"
+
+experiment:
+  rebalance: "monthly_last"  # 按 data_contract: last trading day of month (aligned calendar)
+  window_L: 252              # 约 1 年交易日（smoke 用较短窗口）
+  covariance_method: "ledoit_wolf_shrinkage"  # 或 "sample"
+  x_max: 0.35
+  cost_c: 0.0001
+  eps_db: 1.0e-10
+
+solver:
+  max_iter: 800
+  tol: 1.0e-9
+  rho: 2000.0
+
+calibration:
+  train_frac: 0.60
+  val_frac: 0.20
+  test_frac: 0.20
+
+  p_grid: [0.4, 0.5, 0.6, 0.7, 0.8]
+  TO_target: 0.15
+  eps_TO: 0.01
+
+  alpha_grid: [1.0e-6, 1.0e-5, 1.0e-4]
+
+reporting:
+  make_figures: true
+  figure_format: ["png", "pdf"]
+  selected_windows: 3
