@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Any
@@ -19,28 +18,75 @@ class DataArtifacts:
     aligned_calendar_csv: str
 
 
-def _download_yfinance_adj_close(tickers: List[str], start: str, end: str) -> pd.DataFrame:
+def _set_yfinance_tz_cache_location(cache_dir: Path) -> None:
+    """
+    yfinance uses a sqlite tz-cache (tkr-tz.db). On Windows this can get locked.
+    Force cache into project-local directory to reduce locking issues.
+    """
+    try:
+        if hasattr(yf, "set_tz_cache_location"):
+            yf.set_tz_cache_location(str(cache_dir))
+    except Exception:
+        # Non-fatal; proceed without custom cache location
+        pass
+
+
+def _download_yfinance_adj_close(tickers: List[str], start: str, end: str, cache_dir: Path) -> pd.DataFrame:
+    """
+    Download adjusted price series using yfinance.
+    We enforce threads=False to avoid sqlite "database is locked" from concurrent tz-cache writes.
+    """
+    _set_yfinance_tz_cache_location(cache_dir)
+
     df = yf.download(
         tickers=tickers,
         start=start,
         end=end,
-        auto_adjust=True,
+        auto_adjust=True,   # adjusted prices
         progress=False,
+        threads=False,      # IMPORTANT: avoid concurrent sqlite locks
+        group_by="column",
     )
-    # When multiple tickers: columns are MultiIndex (PriceField, Ticker)
+
+    # yfinance returns either:
+    # - MultiIndex columns: (field, ticker) when multiple tickers
+    # - Single-level columns when one ticker
+    if df is None or len(df) == 0:
+        raise RuntimeError("yfinance download returned empty dataframe. Check network or ticker symbols.")
+
     if isinstance(df.columns, pd.MultiIndex):
-        if ("Close" in df.columns.get_level_values(0)) and ("Adj Close" not in df.columns.get_level_values(0)):
+        # With auto_adjust=True, price field is typically "Close"
+        if "Close" in df.columns.get_level_values(0):
             close = df["Close"].copy()
-        elif "Adj Close" in df.columns.get_level_values(0):
-            close = df["Adj Close"].copy()
         else:
-            close = df.xs(df.columns.levels[0][0], level=0, axis=1).copy()
+            # fallback: take first field
+            first_field = df.columns.levels[0][0]
+            close = df[first_field].copy()
     else:
         # single ticker
-        close = df["Close"].to_frame(name=tickers[0])
+        if "Close" in df.columns:
+            close = df[["Close"]].copy()
+            close.columns = [tickers[0]]
+        else:
+            # fallback
+            close = df.iloc[:, [0]].copy()
+            close.columns = [tickers[0]]
+
     close.index = pd.to_datetime(close.index)
     close = close.sort_index()
-    close.columns = [c.upper() for c in close.columns]
+
+    # Standardize ticker casing
+    close.columns = [str(c).upper() for c in close.columns]
+
+    # Ensure all tickers present; if not, fail fast (universe is fixed by contract)
+    missing = [t.upper() for t in tickers if t.upper() not in close.columns]
+    if missing:
+        raise RuntimeError(
+            f"yfinance download missing tickers: {missing}. "
+            "This may be caused by tz-cache sqlite lock or temporary data source issue. "
+            "Try rerun after replacing data_prep.py (threads=False), or switch to csv_folder."
+        )
+
     return close
 
 
@@ -59,7 +105,7 @@ def _load_csv_folder_adj_close(csv_folder: str, tickers: List[str]) -> pd.DataFr
             raise ValueError(f"{fp} must contain columns: date, adj_close")
         df["date"] = pd.to_datetime(df["date"])
         df = df.sort_values("date")
-        df = df.set_index("date")[["adj_close"]].rename(columns={"adj_close": t})
+        df = df.set_index("date")[["adj_close"]].rename(columns={"adj_close": t.upper()})
         frames.append(df)
     close = pd.concat(frames, axis=1).sort_index()
     return close
@@ -94,31 +140,39 @@ def prepare_returns(cfg: Dict[str, Any]) -> Dict[str, str]:
     processed_dir = Path("data/processed")
     ensure_dir(processed_dir)
 
+    # project-local yfinance cache directory
+    yf_cache_dir = processed_dir / "yfinance_cache"
+    ensure_dir(yf_cache_dir)
+
     if source == "yfinance":
-        close = _download_yfinance_adj_close(tickers, start, end)
+        close = _download_yfinance_adj_close(tickers, start, end, cache_dir=yf_cache_dir)
     elif source == "csv_folder":
         close = _load_csv_folder_adj_close(csv_folder, tickers)
     else:
         raise ValueError("data.source must be one of: yfinance, csv_folder")
 
     aligned = _align_intersection_calendar(close)
+    if aligned.empty:
+        raise RuntimeError("Aligned price dataframe is empty after intersection calendar. Check data availability.")
     rets = _compute_simple_returns(aligned)
+    if rets.empty:
+        raise RuntimeError("Return dataframe is empty after pct_change(). Check date range and data.")
 
-    # Save aligned calendar
+    # Save aligned calendar (prices index)
     aligned_calendar = pd.DataFrame({"date": aligned.index.astype("datetime64[ns]")})
     aligned_calendar_csv = processed_dir / "aligned_calendar.csv"
     aligned_calendar.to_csv(aligned_calendar_csv, index=False)
 
-    # Save returns parquet (long)
-    ret_long = (
-        rets.reset_index()
-        .melt(id_vars=["index"], var_name="ticker", value_name="ret")
-        .rename(columns={"index": "date"})
-    )
+    # Save returns parquet (long) in robust way (no 'index' assumption)
+    rets = rets.copy()
+    rets.index.name = "date"
+    rets.columns.name = "ticker"
+    ret_long = rets.stack().reset_index(name="ret")  # columns: date, ticker, ret
+
     returns_parquet = processed_dir / "returns.parquet"
     ret_long.to_parquet(returns_parquet, index=False)
 
-    # Save assets metadata
+    # Save assets metadata (from raw close, not aligned)
     meta = {}
     for t in tickers:
         s = close[t]
