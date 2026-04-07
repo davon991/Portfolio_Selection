@@ -1,9 +1,3 @@
-
----
-
-# 4) `configs/smoke.yaml`
-
-```yaml
 run:
   name: "smoke"
   results_dir: "results"
