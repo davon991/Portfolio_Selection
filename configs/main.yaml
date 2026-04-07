@@ -1,1 +1,41 @@
+run:
+  name: "main"
+  results_dir: "results"
+  seed: 123
+  code_commit: "NA"
 
+data:
+  source: "yfinance"
+  csv_folder: "data/raw"
+  tickers: ["SPY","VEA","VWO","IEF","TLT","LQD","HYG","GLD","DBC","VNQ"]
+  start: "2008-01-01"
+  end: "2025-12-31"
+
+experiment:
+  rebalance: "monthly_last"
+  window_L: 756                 # ~3 年交易日（主实验更稳定）
+  covariance_method: "ledoit_wolf_shrinkage"
+  x_max: 0.25
+  cost_c: 0.00025
+  eps_db: 1.0e-10
+
+solver:
+  max_iter: 1500
+  tol: 1.0e-10
+  rho: 4000.0
+
+calibration:
+  train_frac: 0.60
+  val_frac: 0.20
+  test_frac: 0.20
+
+  p_grid: [0.4, 0.5, 0.6, 0.7, 0.8]
+  TO_target: 0.15
+  eps_TO: 0.01
+
+  alpha_grid: [1.0e-6, 1.0e-5, 1.0e-4]
+
+reporting:
+  make_figures: true
+  figure_format: ["png", "pdf"]
+  selected_windows: 4
